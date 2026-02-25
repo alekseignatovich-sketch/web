@@ -1,282 +1,265 @@
 import os
 import re
+import sys
+import time
 import requests
 import base64
 import random
+import logging
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from github import Github, GithubException
 
-# Загрузка переменных окружения из .env (локально)
+# =============================================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ (КРИТИЧНО ДЛЯ RAILWAY!)
+# =============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
+# Загрузка .env только локально (на Railway переменные уже в окружении)
 load_dotenv()
 
 app = Flask(__name__)
 
 # =============================================================================
-# КОНФИГУРАЦИЯ
+# КОНФИГУРАЦИЯ С ПРОВЕРКАМИ
 # =============================================================================
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GITHUB_USER = os.getenv("GITHUB_USER")
+def get_env_config():
+    """Безопасное получение конфигурации с детальным логированием"""
+    config = {
+        'github_token': os.getenv("GITHUB_TOKEN"),
+        'groq_api_key': os.getenv("GROQ_API_KEY"),
+        'github_user': os.getenv("GITHUB_USER")
+    }
+    
+    missing = [k for k, v in config.items() if not v]
+    if missing:
+        logger.error(f"❌ Отсутствуют переменные окружения: {missing}")
+        logger.error("💡 Проверьте вкладку Variables в панели Railway")
+        return None
+    
+    # Маскируем токены в логах для безопасности
+    logger.info("✅ Конфигурация загружена")
+    logger.info(f"   GITHUB_USER: {config['github_user']}")
+    logger.info(f"   GROQ_API_KEY: {config['groq_api_key'][:8]}...")
+    logger.info(f"   GITHUB_TOKEN: {config['github_token'][:8]}...")
+    
+    return config
 
-# Проверка наличия всех ключей
-if not all([GITHUB_TOKEN, GROQ_API_KEY, GITHUB_USER]):
-    raise RuntimeError(
-        "❌ Ошибка конфигурации! Проверьте переменные окружения:\n"
-        "- GITHUB_TOKEN\n"
-        "- GROQ_API_KEY\n"
-        "- GITHUB_USER"
-    )
+CONFIG = get_env_config()
+if not CONFIG:
+    logger.critical("🛑 Приложение не может запуститься без конфигурации")
+    # Не выбрасываем исключение — пусть Flask запустится и вернет 500 на healthcheck
+    # Это даст Railway понять, что сервис не готов
 
 # =============================================================================
 # ФУНКЦИИ
 # =============================================================================
 
 def generate_code(prompt: str) -> str:
-    """
-    Генерация HTML-кода сайта через Groq API (модель Llama 3)
-    """
+    """Генерация HTML-кода через Groq API"""
+    if not CONFIG:
+        raise RuntimeError("Конфигурация не загружена")
+        
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {CONFIG['groq_api_key']}",
         "Content-Type": "application/json"
     }
     
     system_prompt = """
-    Ты эксперт-веб разработчик уровня Senior. Твоя задача — написать полный, готовый к использованию код для одностраничного сайта (HTML + CSS внутри тега <style>).
-
-    🔧 ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ:
-    1. Весь CSS должен быть внутри <style> в <head> (никаких внешних файлов).
-    2. Используй современные практики: flexbox/grid, CSS-переменные, адаптивность.
-    3. Подключи Google Fonts (Inter или Roboto) для красивого шрифта.
-    4. Добавь плавные анимации и hover-эффекты для интерактивности.
-    5. Код должен быть валидным HTML5.
-
-    🎨 РАБОТА С ИЗОБРАЖЕНИЯМИ (Pollinations AI):
-    1. Для ВСЕХ изображений используй сервис: https://image.pollinations.ai/prompt/{описание}
-    2. Формат ссылки: https://image.pollinations.ai/prompt/{описание_на_английском}
-    3. Правила описания:
-       - Только английский язык
-       - Слова через нижнее подчеркивание: modern_office_workspace
-       - Без пробелов и спецсимволов
-       - Будь конкретен: не "image", а "happy_businesswoman_presentation"
-    4. Примеры:
-       <img src="https://image.pollinations.ai/prompt/cozy_coffee_shop_interior" alt="Coffee Shop">
-       <div style="background-image: url('https://image.pollinations.ai/prompt/sunset_mountain_landscape')">
-    5. Для аватарок добавь параметр width: ?width=200
-
-    📦 ФОРМАТ ОТВЕТА:
-    - Верни ТОЛЬКО чистый HTML-код
-    - БЕЗ markdown-блоков (```html), БЕЗ пояснений, БЕЗ комментариев о коде
-    - Начни сразу с <!DOCTYPE html>
-    - Если генерируешь JavaScript, помести его в <script> в конце <body>
-
-    🎯 ЦЕЛЬ:
-    Создать красивый, профессиональный сайт, который сразу работает после открытия в браузере.
+    Ты эксперт-веб разработчик. Создай одностраничный сайт (HTML + CSS в <style>).
+    
+    🎨 ИЗОБРАЖЕНИЯ (Pollinations AI):
+    - Формат: https://image.pollinations.ai/prompt/{описание_на_английском}
+    - Пример: <img src="https://image.pollinations.ai/prompt/modern_office">
+    - Только английский, слова через подчеркивание, без пробелов
+    
+    📦 ОТВЕТ:
+    - ТОЛЬКО чистый HTML, начинай с <!DOCTYPE html>
+    - Без markdown, без пояснений
     """
 
     payload = {
         "messages": [
-            {"role": "system", " "content": system_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Создай сайт: {prompt}"}
         ],
-        "model": "llama3-70b-8192",  # Мощная и быстрая модель
-        "temperature": 0.7,            # Баланс креативности и точности
-        "max_tokens": 8192,            # Максимальный контекст для больших сайтов
-        "top_p": 0.95
+        "model": "llama3-70b-8192",
+        "temperature": 0.7,
+        "max_tokens": 8192
     }
 
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        return result['choices'][0]['message']['content']
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Ошибка Groq API: {str(e)}")
+    logger.info(f"🤖 Запрос к Groq API для: {prompt[:50]}...")
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    response.raise_for_status()
+    result = response.json()
+    return result['choices'][0]['message']['content']
 
 
 def clean_html_code(code: str) -> str:
-    """
-    Очистка кода от markdown-разметки и лишних символов
-    """
-    # Убираем markdown блоки
-    code = re.sub(r'^```html\s*', '', code, flags=re.MULTILINE)
+    """Очистка кода от markdown и мусора"""
+    code = re.sub(r'^```(?:html)?\s*', '', code, flags=re.MULTILINE)
     code = re.sub(r'\s*```$', '', code, flags=re.MULTILINE)
-    code = re.sub(r'^```\s*', '', code, flags=re.MULTILINE)
-    
-    # Убираем возможные комментарии ИИ в начале/конце
     code = code.strip()
     
-    # Если код не начинается с <!DOCTYPE или <html, пробуем найти первый <
+    # Найти начало HTML если ИИ добавил текст перед кодом
     if not code.startswith('<'):
-        match = re.search(r'(<!DOCTYPE[^>]*>|<html[^>]*>|<head[^>]*>)', code, re.IGNORECASE)
+        match = re.search(r'(<!DOCTYPE[^>]*>|<html[^>]*>)', code, re.IGNORECASE)
         if match:
             code = code[match.start():]
-    
     return code
 
 
 def upload_to_github(code_content: str, site_name: str) -> tuple[str, str]:
-    """
-    Создание репозитория и загрузка index.html на GitHub
-    
-    Returns:
-        tuple: (url репозитория, имя репозитория)
-    """
-    g = Github(GITHUB_TOKEN)
+    """Загрузка сайта на GitHub"""
+    if not CONFIG:
+        raise RuntimeError("Конфигурация не загружена")
+        
+    g = Github(CONFIG['github_token'])
     user = g.get_user()
     
-    # Санитизация имени для GitHub (только латиница, цифры, дефисы)
     safe_name = re.sub(r'[^a-zA-Z0-9-]', '-', site_name.lower())
     safe_name = re.sub(r'-+', '-', safe_name).strip('-')
-    
-    # Формируем уникальное имя репозитория
     base_repo_name = f"site-{safe_name}"
     
-    # Проверяем существование и добавляем суффикс при коллизии
+    # Уникальное имя репозитория
     repo_name = base_repo_name
-    attempt = 0
-    while attempt < 10:
+    for attempt in range(10):
         try:
-            # Пытаемся создать репозиторий
             repo = user.create_repo(
                 name=repo_name,
-                description=f"AI-generated website: {site_name}",
+                description=f"AI-generated: {site_name}",
                 private=False,
                 auto_init=False
             )
+            logger.info(f"✅ Создан репозиторий: {repo_name}")
             break
         except GithubException as e:
-            if e.status == 422:  # Имя уже занято
-                attempt += 1
+            if e.status == 422:  # Имя занято
                 repo_name = f"{base_repo_name}-{random.randint(1000, 9999)}"
             else:
                 raise
+    else:
+        raise RuntimeError("Не удалось создать уникальное имя репозитория")
     
-    # Кодируем контент в base64 для GitHub API
-    content_bytes = code_content.encode('utf-8')
-    content_base64 = base64.b64encode(content_bytes).decode('utf-8')
-    
-    # Создаем файл index.html
+    # Загрузка файла
+    content_b64 = base64.b64encode(code_content.encode('utf-8')).decode('utf-8')
     repo.create_file(
         path="index.html",
-        message=f"✨ AI generated: {site_name}\n\nPollinations AI images included",
-        content=content_base64,
+        message=f"✨ AI generated: {site_name}",
+        content=content_b64,
         branch="main"
     )
-    
-    # Включаем GitHub Pages (через API v3)
-    try:
-        repo.edit(pages_source={"branch": "main", "path": "/"})
-    except GithubException:
-        # Pages может потребовать ручного включения в настройках репозитория
-        pass
+    logger.info("✅ Файл index.html загружен")
     
     return repo.html_url, repo.name
 
 
 # =============================================================================
-# FLASK ROUTES
+# ROUTES
 # =============================================================================
 
 @app.route('/')
 def index():
-    """Главная страница с формой создания сайта"""
+    """Главная страница"""
+    logger.info("📄 Запрошена главная страница")
     return render_template('index.html')
 
 
 @app.route('/health')
 def health():
-    """Endpoint для проверки работоспособности (healthcheck Railway)"""
-    return jsonify({"status": "ok", "service": "ai-website-builder"}), 200
+    """Healthcheck для Railway — должен возвращать 200"""
+    # Проверяем, что конфигурация загружена
+    if not CONFIG:
+        logger.warning("⚠️ Healthcheck: конфигурация не загружена")
+        return jsonify({"status": "unhealthy", "reason": "missing_config"}), 503
+    
+    # Проверяем доступность внешних API (опционально, можно закомментировать для скорости)
+    try:
+        # Быстрая проверка Groq API (без реального запроса)
+        requests.get("https://api.groq.com", timeout=3)
+    except:
+        pass  # Не блокируем healthcheck, если API временно недоступен
+    
+    return jsonify({
+        "status": "healthy",
+        "service": "ai-website-builder",
+        "timestamp": time.time()
+    }), 200
 
 
 @app.route('/generate', methods=['POST'])
 def generate():
-    """API endpoint для генерации сайта"""
-    data = request.get_json()
+    """API генерации сайта"""
+    logger.info("🎯 Получен запрос на генерацию")
     
-    if not data:
-        return jsonify({"error": "Требуется JSON в теле запроса"}), 400
+    if not CONFIG:
+        return jsonify({"error": "Сервер не настроен: отсутствуют переменные окружения"}), 503
     
+    data = request.get_json(silent=True) or {}
     prompt = data.get('prompt', '').strip()
-    site_name = data.get('name', 'my-site').strip()
+    site_name = data.get('name', 'my-site').strip() or 'my-site'
     
-    # Валидация входных данных
     if not prompt:
-        return jsonify({"error": "Поле 'prompt' обязательно и не может быть пустым"}), 400
+        return jsonify({"error": "Поле 'prompt' обязательно"}), 400
     if len(prompt) > 2000:
-        return jsonify({"error": "Описание слишком длинное (макс. 2000 символов)"}), 400
-    if not site_name:
-        site_name = "my-site"
+        return jsonify({"error": "Описание слишком длинное"}), 400
     
     try:
-        print(f"🎯 Новый запрос: '{prompt}' (проект: {site_name})")
-        
-        # Шаг 1: Генерация кода через ИИ
-        print("🤖 Генерация HTML-кода...")
+        logger.info(f"🤖 Генерация кода для: {site_name}")
         html_code = generate_code(prompt)
         html_code = clean_html_code(html_code)
         
         if not html_code.strip().startswith('<'):
-            raise RuntimeError("ИИ вернул некорректный HTML-код")
+            raise ValueError("ИИ вернул некорректный HTML")
         
-        # Шаг 2: Загрузка на GitHub
-        print("📤 Загрузка на GitHub...")
+        logger.info("📤 Загрузка на GitHub...")
         repo_url, repo_name = upload_to_github(html_code, site_name)
+        pages_url = f"https://{CONFIG['github_user']}.github.io/{repo_name}/"
         
-        # Формируем ссылку на GitHub Pages
-        pages_url = f"https://{GITHUB_USER}.github.io/{repo_name}/"
-        
-        print(f"✅ Готово! Репозиторий: {repo_url}")
+        logger.info(f"✅ Готово: {repo_url}")
         
         return jsonify({
             "success": True,
-            "message": "Сайт успешно создан!",
             "repo": repo_url,
             "preview": pages_url,
             "repo_name": repo_name,
-            "code": html_code  # Для локального предпросмотра в iframe
+            "code": html_code
         })
         
-    except RuntimeError as e:
-        print(f"❌ Ошибка бизнес-логики: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-        
-    except GithubException as e:
-        print(f"❌ GitHub API ошибка: {str(e)}")
-        if e.status == 401:
-            return jsonify({"error": "Неверный GitHub токен. Проверьте переменную GITHUB_TOKEN"}), 500
-        elif e.status == 403:
-            return jsonify({"error": "Нет прав на создание репозиториев. Проверьте scope токена (нужен 'repo')"}), 500
-        else:
-            return jsonify({"error": f"GitHub ошибка: {e.data.get('message', str(e))}"}), 500
-            
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Превышено время ожидания ответа от ИИ. Попробуйте ещё раз."}), 504
-        
     except Exception as e:
-        print(f"❌ Неожиданная ошибка: {type(e).__name__}: {str(e)}")
-        return jsonify({"error": f"Внутренняя ошибка сервера: {str(e)}"}), 500
+        logger.error(f"❌ Ошибка генерации: {type(e).__name__}: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 # =============================================================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
+# ЗАПУСК
 # =============================================================================
 
 if __name__ == '__main__':
-    # Railway.app задает порт через переменную окружения PORT
-    # host="0.0.0.0" обязателен для доступа извне
-    # debug=False в продакшене (включайте True только локально!)
-    
+    # Railway задает PORT, локально используем 5000
     port = int(os.environ.get("PORT", 5000))
-    debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+    # debug включаем только если явно задано FLASK_DEBUG=true
+    debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     
-    print(f"🚀 Запуск сервера на порту {port} (debug={debug_mode})")
+    # КРИТИЧНО: host="0.0.0.0" чтобы принимать внешние соединения
+    logger.info(f"🚀 Запуск Flask сервера")
+    logger.info(f"   Host: 0.0.0.0")
+    logger.info(f"   Port: {port}")
+    logger.info(f"   Debug: {debug}")
     
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=debug_mode,
-        threaded=True  # Обработка нескольких запросов одновременно
-    )
+    try:
+        app.run(
+            host="0.0.0.0",  # 🔥 Обязательно для Railway!
+            port=port,
+            debug=debug,
+            threaded=True
+        )
+    except Exception as e:
+        logger.critical(f"💥 Не удалось запустить сервер: {e}", exc_info=True)
+        sys.exit(1)
