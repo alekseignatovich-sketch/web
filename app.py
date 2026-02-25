@@ -86,8 +86,8 @@ def generate_code(prompt: str) -> str:
 
     payload = {
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Создай сайт: {prompt}"}
+            {"role": "system","content": system_prompt},
+            {"role": "user","content": f"Создай сайт: {prompt}"}
         ],
         "model": "llama3-70b-8192",
         "temperature": 0.7,
