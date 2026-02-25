@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Website Builder</title>
+    <style>
+        :root { --primary: #6366f1; --primary-hover: #4f46e5; --bg: #f8fafc; }
+        body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background: var(--bg); color: #333; }
+        .container { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #1e293b; margin-bottom: 10px; }
+        p.subtitle { text-align: center; color: #64748b; margin-bottom: 30px; }
+        
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-weight: 600; color: #334155; }
+        input, textarea { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 16px; box-sizing: border-box; transition: border-color 0.3s; font-family: inherit; }
+        input:focus, textarea:focus { outline: none; border-color: var(--primary); }
+        textarea { height: 120px; resize: vertical; }
+        
+        button { width: 100%; padding: 16px; background: var(--primary); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 18px; font-weight: 600; transition: background 0.3s; }
+        button:hover { background: var(--primary-hover); }
+        button:disabled { background: #cbd5e1; cursor: not-allowed; }
+        
+        .loader { display: none; text-align: center; padding: 30px; }
+        .spinner { width: 40px; height: 40px; border: 4px solid #e2e8f0; border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 15px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        #result { display: none; margin-top: 30px; border-top: 2px solid #e2e8f0; padding-top: 30px; }
+        .links { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px; }
+        .btn-link { flex: 1; text-align: center; text-decoration: none; padding: 12px 20px; border-radius: 8px; font-weight: 600; transition: opacity 0.3s; min-width: 200px; }
+        .btn-repo { background: #333; color: white; }
+        .btn-preview { background: #22c55e; color: white; }
+        .btn-link:hover { opacity: 0.9; }
+        
+        .preview-container { border: 2px solid #e2e8f0; border-radius: 8px; overflow: hidden; background: white; }
+        .preview-header { background: #f1f5f9; padding: 10px 15px; font-size: 14px; color: #64748b; border-bottom: 1px solid #e2e8f0; }
+        iframe { width: 100%; height: 500px; border: none; display: block; }
+        
+        .error { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; padding: 15px; border-radius: 8px; margin-top: 20px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 AI Website Builder</h1>
+        <p class="subtitle">Опишите сайт, и ИИ создаст его с уникальными изображениями</p>
+        
+        <div class="form-group">
+            <label for="siteName">Название проекта (латиницей)</label>
+            <input type="text" id="siteName" placeholder="например: coffee-shop">
+        </div>
+        
+        <div class="form-group">
+            <label for="prompt">Описание сайта</label>
+            <textarea id="prompt" placeholder="Например: Лендинг для кофейни в центре города. Меню, контакты, форма бронирования. Стиль: минимализм, теплые цвета."></textarea>
+        </div>
+        
+        <button onclick="createSite()" id="btn">✨ Создать сайт</button>
+        
+        <div class="loader" id="loader">
+            <div class="spinner"></div>
+            <h3>ИИ пишет код и рисует картинки...</h3>
+            <p style="color: #64748b;">Это займет около 15-30 секунд</p>
+        </div>
+        
+        <div class="error" id="error"></div>
+        
+        <div id="result">
+            <h2>✅ Сайт готов!</h2>
+            <div class="links">
+                <a href="#" id="repoLink" target="_blank" class="btn-link btn-repo">📂 Репозиторий GitHub</a>
+                <a href="#" id="pageLink" target="_blank" class="btn-link btn-preview">🌐 Открыть сайт</a>
+            </div>
+            <p style="color: #64748b; font-size: 14px;">⚠️ GitHub Pages может активироваться через 1-2 минуты.</p>
+            
+            <div class="preview-container">
+                <div class="preview-header">👁️ Предпросмотр (локальный)</div>
+                <iframe id="previewFrame"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function createSite() {
+            const prompt = document.getElementById('prompt').value;
+            const name = document.getElementById('siteName').value || 'ai-site';
+            const btn = document.getElementById('btn');
+            const loader = document.getElementById('loader');
+            const result = document.getElementById('result');
+            const errorDiv = document.getElementById('error');
+            
+            if (!prompt.trim()) {
+                showError("Пожалуйста, введите описание сайта");
+                return;
+            }
+
+            btn.disabled = true;
+            loader.style.display = 'block';
+            result.style.display = 'none';
+            errorDiv.style.display = 'none';
+
+            try {
+                const res = await fetch('/generate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ prompt, name })
+                });
+                
+                const data = await res.json();
+
+                if (data.success) {
+                    document.getElementById('repoLink').href = data.repo;
+                    document.getElementById('pageLink').href = data.preview;
+                    document.getElementById('previewFrame').srcdoc = data.code;
+                    result.style.display = 'block';
+                } else {
+                    showError(data.error || "Произошла неизвестная ошибка");
+                }
+            } catch (e) {
+                showError("Ошибка соединения с сервером: " + e.message);
+            } finally {
+                btn.disabled = false;
+                loader.style.display = 'none';
+            }
+        }
+
+        function showError(msg) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = "❌ " + msg;
+            errorDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
